@@ -4,13 +4,16 @@
  * with an "Open windows?" recommendation + status LEDs + local TMP36.
  *
  * LED wiring (common-cathode RGB):
- *   Wi-Fi / browser activity  → GPIO 5  + 220–330Ω → GND
- *   Sensor POST received      → GPIO 2  + 220–330Ω → GND
- *   RGB Red                   → GPIO 12 + 220–330Ω ─┐
- *   RGB Green                 → GPIO 13 + 220–330Ω ─┼─ common cathode → GND
- *   RGB Blue                  → GPIO 14 + 220–330Ω ─┘
- *   Indoor data fresh         → GPIO 15 + 220–330Ω → GND
- *   Outdoor data fresh        → GPIO 16 + 220–330Ω → GND
+ *   Wi-Fi / browser activity  → GPIO 16 + 220–330Ω → GND
+ *   Sensor POST received      → GPIO 2  + 220–330Ω → GND  (onboard LED)
+ *   RGB Red                   → GPIO 13 + 220–330Ω ─┐
+ *   RGB Green                 → GPIO 14 + 220–330Ω ─┼─ common cathode → GND
+ *   RGB Blue                  → GPIO 18 + 220–330Ω ─┘
+ *   Indoor data fresh         → GPIO 19 + 220–330Ω → GND
+ *   Outdoor data fresh        → GPIO 21 + 220–330Ω → GND
+ *
+ * Pin choices avoid the ESP32 boot strapping pins (0, 5, 12, 15).
+ * GPIO 2 is kept because it drives the onboard LED.
  *
  * TMP36 (Arduino Starter Kit):
  *   Vs   → 3.3V
@@ -27,18 +30,18 @@
 #include "secrets.h"
 
 // ---------- LED pins ----------
-#define LED_WIFI      5
-#define LED_RX        2
-#define LED_RGB_R     12
-#define LED_RGB_G     13
-#define LED_RGB_B     14
-#define LED_INDOOR    15
-#define LED_OUTDOOR   16
+#define LED_WIFI      16
+#define LED_RX        2    // onboard LED
+#define LED_RGB_R     13
+#define LED_RGB_G     14
+#define LED_RGB_B     18
+#define LED_INDOOR    19
+#define LED_OUTDOOR   21
 
 // ---------- TMP36 ----------
 #define TMP36_PIN     34
 #define TMP36_SAMPLES 16
-#define TMP36_OFFSET_C -4.0f; // adjust this offset to calibrate the TMP36 sensor
+#define TMP36_OFFSET_C -4.0f   // adjust as needed to calibrate the TMP36 sensor
 
 #define FRESH_MS      180000UL
 
@@ -48,12 +51,20 @@
 struct NodeReading {
   char id[16];
   char location[12];
-  float temp_c;
-  float humidity;
+  float tempHist[READING_HISTORY_N];  // rolling window of raw readings
+  float humHist[READING_HISTORY_N];
+  uint8_t histIdx;
+  uint8_t histCount;
+  float temp_c;        // rolling mean over the window — what the hub decides on
+  float humidity;      // rolling mean over the window
   int rssi;
   unsigned long last_seen_ms;
   bool valid;
 };
+
+// Set by getAverages(): true when indoor temp fell back to the hub's TMP36
+// because no indoor node is reporting.
+bool indoorFromHub = false;
 
 NodeReading nodes[MAX_NODES];
 int nodeCount = 0;
@@ -89,6 +100,10 @@ void getAverages(float& indoorTemp, float& indoorHum,
                  int& indoorCount, int& outdoorCount);
 void updateStatusLeds();
 
+enum RecState { REC_WAITING, REC_OPEN, REC_CAUTION, REC_MARGINAL, REC_CLOSED };
+RecState computeRecommendation(float iT, float iH, float oT, float oH,
+                               int iCnt, int oCnt);
+
 NodeReading* findOrCreate(const char* id) {
   for (int i = 0; i < nodeCount; i++) {
     if (strcmp(nodes[i].id, id) == 0) return &nodes[i];
@@ -99,6 +114,23 @@ NodeReading* findOrCreate(const char* id) {
   n->id[sizeof(n->id) - 1] = '\0';
   n->valid = false;
   return n;
+}
+
+// Push one raw reading into the node's rolling window and refresh its
+// smoothed (mean) values. Window length is READING_HISTORY_N (≈5 min).
+void pushNodeReading(NodeReading* n, float tempC, float humidity) {
+  n->tempHist[n->histIdx] = tempC;
+  n->humHist[n->histIdx]  = humidity;
+  n->histIdx = (n->histIdx + 1) % READING_HISTORY_N;
+  if (n->histCount < READING_HISTORY_N) n->histCount++;
+
+  float sumT = 0, sumH = 0;
+  for (uint8_t i = 0; i < n->histCount; i++) {
+    sumT += n->tempHist[i];
+    sumH += n->humHist[i];
+  }
+  n->temp_c   = sumT / n->histCount;
+  n->humidity = sumH / n->histCount;
 }
 
 void getAverages(float& indoorTemp, float& indoorHum,
@@ -123,6 +155,17 @@ void getAverages(float& indoorTemp, float& indoorHum,
     }
   }
   if (indoorCount)  { indoorTemp  /= indoorCount;  indoorHum  /= indoorCount; }
+
+  // Fallback: no indoor node reporting — use the hub's own TMP36 as the
+  // indoor temperature. Humidity is unknown in this case (NaN → JSON null).
+  indoorFromHub = false;
+  if (indoorCount == 0 && !isnan(localTempC)) {
+    indoorTemp    = localTempC;
+    indoorHum     = NAN;
+    indoorCount   = 1;
+    indoorFromHub = true;
+  }
+
   if (outdoorCount) { outdoorTemp /= outdoorCount; outdoorHum /= outdoorCount; }
 }
 
@@ -143,20 +186,12 @@ void updateStatusLeds() {
   digitalWrite(LED_INDOOR,  indoorFresh  ? HIGH : LOW);
   digitalWrite(LED_OUTDOOR, outdoorFresh ? HIGH : LOW);
 
-  if (iCnt == 0 || oCnt == 0) {
-    setRgb(0, 0, 0);
-  } else {
-    bool coolerOutside = (oT <= iT - TEMP_DELTA_C);
-    bool humidityOk    = (oH <= MAX_OUTDOOR_RH);
-    if (coolerOutside && humidityOk) {
-      setRgb(0, 180, 0);
-    } else if (coolerOutside && !humidityOk) {
-      setRgb(220, 120, 0);
-    } else if (!coolerOutside && oT < iT) {
-      setRgb(180, 100, 0);
-    } else {
-      setRgb(200, 0, 0);
-    }
+  switch (computeRecommendation(iT, iH, oT, oH, iCnt, oCnt)) {
+    case REC_OPEN:     setRgb(0, 180, 0);   break;  // green
+    case REC_CAUTION:  setRgb(220, 120, 0); break;  // amber
+    case REC_MARGINAL: setRgb(180, 100, 0); break;  // dim orange
+    case REC_CLOSED:   setRgb(200, 0, 0);   break;  // red
+    default:           setRgb(0, 0, 0);     break;  // off = waiting for data
   }
 
   if (wifiBlinkUntil == 0) {
@@ -164,21 +199,46 @@ void updateStatusLeds() {
   }
 }
 
+// Hysteresis state machine: latch OPEN once outdoor is cooler by
+// TEMP_DELTA_OPEN_C, hold it until the margin shrinks below
+// TEMP_DELTA_CLOSE_C (or outdoor humidity goes bad). Both the RGB LED
+// and the dashboard text go through here so they can never disagree.
+RecState computeRecommendation(float iT, float iH, float oT, float oH,
+                               int iCnt, int oCnt) {
+  (void)iH;  // indoor humidity is display-only; the gate is outdoor humidity
+  static bool openLatched = false;
+
+  if (iCnt == 0 || oCnt == 0) { openLatched = false; return REC_WAITING; }
+
+  bool humidityOk = (oH <= MAX_OUTDOOR_RH);
+  bool coolToOpen = (oT <= iT - TEMP_DELTA_OPEN_C);
+  bool coolToHold = (oT <= iT - TEMP_DELTA_CLOSE_C);
+
+  if (!openLatched) {
+    if (coolToOpen && humidityOk) openLatched = true;
+  } else if (!coolToHold || !humidityOk) {
+    openLatched = false;
+  }
+
+  if (openLatched)                return REC_OPEN;
+  if (coolToOpen && !humidityOk)   return REC_CAUTION;
+  if (oT < iT)                    return REC_MARGINAL;
+  return REC_CLOSED;
+}
+
+const char* recStateText(RecState s) {
+  switch (s) {
+    case REC_OPEN:     return "✅ OPEN windows / doors — outdoor air is cooler and humidity is acceptable";
+    case REC_CAUTION:  return "⚠️ Cooler outside but humidity is high — open only if you accept more moisture";
+    case REC_MARGINAL: return "➖ Slightly cooler outside — marginal benefit";
+    case REC_CLOSED:   return "❌ Keep closed — outdoor is warmer or not beneficial";
+    default:           return "Waiting for indoor & outdoor data…";
+  }
+}
+
 const char* getRecommendation(float iT, float iH, float oT, float oH,
                               int iCnt, int oCnt) {
-  if (iCnt == 0 || oCnt == 0) return "Waiting for indoor & outdoor data…";
-  bool coolerOutside = (oT <= iT - TEMP_DELTA_C);
-  bool humidityOk    = (oH <= MAX_OUTDOOR_RH);
-  if (coolerOutside && humidityOk) {
-    return "✅ OPEN windows / doors — outdoor air is cooler and humidity is acceptable";
-  }
-  if (coolerOutside && !humidityOk) {
-    return "⚠️ Cooler outside but humidity is high — open only if you accept more moisture";
-  }
-  if (!coolerOutside && oT < iT) {
-    return "➖ Slightly cooler outside — marginal benefit";
-  }
-  return "❌ Keep closed — outdoor is warmer or not beneficial";
+  return recStateText(computeRecommendation(iT, iH, oT, oH, iCnt, oCnt));
 }
 
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
@@ -235,7 +295,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
   <div class="rec" id="recommendation">Loading…</div>
   <div class="grid" id="cards"></div>
-  <footer>Auto-refreshes every 15 s · ESP32 Climate Hub</footer>
+  <footer>Auto-refreshes every 15 s · Node values are 5-min rolling averages · ESP32 Climate Hub</footer>
 
 <script>
 let useF = localStorage.getItem('climateUnit') === 'F';
@@ -279,8 +339,8 @@ async function refresh() {
     sum.innerHTML = `
       <h2>Averages</h2>
       ${localRow}
-      <div class="row"><span class="label">Indoor Temp</span><span class="val">${fmtTemp(d.indoor.temp_c, d.indoor.temp_f)}</span></div>
-      <div class="row"><span class="label">Indoor Humidity</span><span class="val">${d.indoor.humidity.toFixed(0)} %</span></div>
+      <div class="row"><span class="label">Indoor Temp${d.indoor.source === 'hub_tmp36' ? ' (hub TMP36)' : ''}</span><span class="val">${fmtTemp(d.indoor.temp_c, d.indoor.temp_f)}</span></div>
+      <div class="row"><span class="label">Indoor Humidity</span><span class="val">${d.indoor.humidity == null ? '—' : d.indoor.humidity.toFixed(0) + ' %'}</span></div>
       <div class="row"><span class="label">Outdoor Temp</span><span class="val">${fmtTemp(d.outdoor.temp_c, d.outdoor.temp_f)}</span></div>
       <div class="row"><span class="label">Outdoor Humidity</span><span class="val">${d.outdoor.humidity.toFixed(0)} %</span></div>
       <div class="row"><span class="label">Nodes reporting</span><span class="val">${d.indoor.count} in / ${d.outdoor.count} out</span></div>
@@ -339,8 +399,9 @@ void handleStatus() {
   JsonObject indoor = doc["indoor"].to<JsonObject>();
   indoor["temp_c"]   = iT;
   indoor["temp_f"]   = cToF(iT);
-  indoor["humidity"] = iH;
+  indoor["humidity"] = iH;   // null when indoor temp fell back to the hub TMP36
   indoor["count"]    = iCnt;
+  indoor["source"]   = indoorFromHub ? "hub_tmp36" : "nodes";
 
   JsonObject outdoor = doc["outdoor"].to<JsonObject>();
   outdoor["temp_c"]   = oT;
@@ -390,14 +451,15 @@ void handleReading() {
 
   strncpy(n->location, doc["location"] | "indoor", sizeof(n->location) - 1);
   n->location[sizeof(n->location) - 1] = '\0';
-  n->temp_c       = doc["temp_c"] | 0.0f;
-  n->humidity     = doc["humidity"] | 0.0f;
+  pushNodeReading(n, doc["temp_c"] | 0.0f, doc["humidity"] | 0.0f);
   n->rssi         = doc["rssi"] | 0;
   n->last_seen_ms = millis();
   n->valid        = true;
 
   rxBlinkUntil = millis() + 150;
-  Serial.printf("RX %s (%s): %.1f°C  %.0f%%\n", n->id, n->location, n->temp_c, n->humidity);
+  Serial.printf("RX %s (%s): %.1f°C  %.0f%%  (smoothed %.1f°C / %d samples)\n",
+                n->id, n->location, (double)(doc["temp_c"] | 0.0f),
+                (double)(doc["humidity"] | 0.0f), n->temp_c, n->histCount);
 
   server.send(200, "application/json", "{\"status\":\"ok\"}");
   updateStatusLeds();

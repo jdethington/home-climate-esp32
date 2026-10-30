@@ -6,7 +6,7 @@ Guidance for placing ESP32 + DHT11 nodes outside in hot, dry (and occasionally m
 
 - Same firmware as indoor nodes (`outdoor1` / `outdoor2` PlatformIO environments).
 - Reports temperature and humidity to the hub every ~30 s.
-- Hub uses outdoor data for the open-windows recommendation (must be cooler outside by `TEMP_DELTA_C` and outdoor RH ≤ `MAX_OUTDOOR_RH`).
+- Hub uses outdoor data for the open-windows recommendation (must be cooler outside by `TEMP_DELTA_OPEN_C`, with hysteresis via `TEMP_DELTA_CLOSE_C`, and outdoor RH ≤ `MAX_OUTDOOR_RH`).
 
 You can run with a single outdoor node; a second improves coverage (e.g. front vs back of house).
 

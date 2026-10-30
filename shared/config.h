@@ -13,8 +13,15 @@
 #define MAX_NODES            8
 
 // Recommendation thresholds (tune for Phoenix comfort)
-#define TEMP_DELTA_C         2.0f      // outdoor must be at least this many °C cooler
+// Hysteresis: latch OPEN when outdoor is cooler by TEMP_DELTA_OPEN_C,
+// hold it until the margin shrinks below TEMP_DELTA_CLOSE_C.
+#define TEMP_DELTA_OPEN_C    2.0f      // °C cooler to trigger the OPEN recommendation
+#define TEMP_DELTA_CLOSE_C   1.0f      // °C cooler to keep holding it
 #define MAX_OUTDOOR_RH       65.0f     // don't recommend if outdoor RH above this %
+
+// Smoothing: the hub averages each node's last N readings before deciding.
+// N = 10 at the default 30 s interval ≈ 5 minutes of readings.
+#define READING_HISTORY_N    10
 
 // HTTP endpoint the sensors POST to
 #define API_PATH             "/api/reading"

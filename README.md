@@ -135,7 +135,7 @@ On any device on the same Wi‑Fi:
 http://<hub-ip>/
 ```
 
-You should see the recommendation, averages (including Hub TMP36), and each node. Use the **°C / °F** switch at the top; the choice is remembered in the browser.
+You should see the recommendation, indoor/outdoor averages (plus the hub's own TMP36 reading), and each node. Use the **°C / °F** switch at the top; the choice is remembered in the browser.
 
 ---
 
@@ -162,27 +162,30 @@ Most modules already have a pull-up. Pin is set in `shared/config.h` as `DHT_PIN
 If the hub temperature is consistently high/low vs a known thermometer, tune in `web-server/src/main.cpp`:
 
 ```cpp
-#define TMP36_OFFSET_C  11.0f   // adjust as needed
+#define TMP36_OFFSET_C  -4.0f   // adjust as needed
 ```
 
 ### Hub status LEDs (as used in current firmware)
 
 | Function                                            | GPIO   | Notes                       |
 | --------------------------------------------------- | ------ | --------------------------- |
-| Sensor POST received (blink)                        | **2**  | Short blink on each reading |
-| Wi‑Fi connected (+ brief blink on browser activity) | **5**  | Solid when joined to router |
-| RGB Red                                             | **12** | PWM                         |
-| RGB Green                                           | **13** | PWM                         |
-| RGB Blue                                            | **14** | PWM                         |
-| Indoor data fresh (&lt; 3 min)                      | **15** |                             |
-| Outdoor data fresh (&lt; 3 min)                     | **16** |                             |
+| Sensor POST received (blink)                        | **2**  | Onboard LED |
+| Wi‑Fi connected (+ brief blink on browser activity) | **16**  | Solid when joined to router |
+| RGB Red                                             | **13** | PWM                         |
+| RGB Green                                           | **14** | PWM                         |
+| RGB Blue                                            | **18** | PWM                         |
+| Indoor data fresh (&lt; 3 min)                      | **19** |                             |
+| Outdoor data fresh (&lt; 3 min)                     | **21** |                             |
+
+Pin choices avoid the ESP32 boot strapping pins (0, 5, 12, 15). GPIO 2 is kept
+because it drives the onboard LED.
 
 **RGB (common-cathode, 4 wires)**
 
 ```
-GPIO 12 ──[220–330Ω]── Red
-GPIO 13 ──[220–330Ω]── Green
-GPIO 14 ──[220–330Ω]── Blue
+GPIO 13 ──[220–330Ω]── Red
+GPIO 14 ──[220–330Ω]── Green
+GPIO 18 ──[220–330Ω]── Blue
 GND ─────────────────── Cathode (usually the longest pin)
 ```
 
@@ -204,16 +207,27 @@ Discrete LEDs: GPIO → resistor → LED anode; cathode → GND.
 Configured in `shared/config.h`:
 
 ```cpp
-#define TEMP_DELTA_C    2.0f   // outdoor must be at least this many °C cooler
-#define MAX_OUTDOOR_RH  65.0f  // max outdoor RH (%) to fully recommend opening
+#define TEMP_DELTA_OPEN_C   2.0f   // latch OPEN when outdoor is this many °C cooler
+#define TEMP_DELTA_CLOSE_C  1.0f   // drop OPEN when the margin shrinks below this
+#define MAX_OUTDOOR_RH      65.0f  // max outdoor RH (%) to fully recommend opening
+#define READING_HISTORY_N   10     // per-node readings averaged (≈5 min at 30 s)
 ```
 
-- **Open** — outdoor cooler by ≥ `TEMP_DELTA_C` and RH ≤ `MAX_OUTDOOR_RH`
+- **Smoothing** — the hub keeps each node's last 10 readings (~5 minutes) and
+  decides on the rolling average, so one noisy DHT11 read can't flip the
+  recommendation. Node cards on the dashboard show these smoothed values.
+- **Hysteresis** — the OPEN recommendation latches on once outdoor is ≥ 2 °C
+  cooler (and humidity is OK) and stays on until the margin shrinks below 1 °C
+  or outdoor humidity goes bad. No flapping on borderline evenings.
+- **OPEN** — outdoor cooler by ≥ `TEMP_DELTA_OPEN_C` and RH ≤ `MAX_OUTDOOR_RH`
 - **Caution** — cooler outside but humidity high
 - **Marginal** — slightly cooler, small benefit
 - **Keep closed** — outdoor warmer or not beneficial
+- **Indoor fallback** — if no indoor node is reporting, the hub's TMP36 stands in
+  as the indoor temperature (the dashboard labels it and shows "—" for humidity).
 
-Rebuild and re-upload the **web-server** after changing thresholds.
+The RGB LED and the dashboard banner share one decision function, so they can
+never disagree. Rebuild and re-upload the **web-server** after changing thresholds.
 
 ---
 
@@ -270,7 +284,7 @@ POST http://192.168.0.x:80/api/reading → HTTP 200  (OK)
 | Sensor `HTTP -1` / `-11`           | Confirm hub IP in sensor `secrets.h`, re-upload sensor; same 2.4 GHz Wi‑Fi; retries are built in |
 | DHT11 NaN or 0 °C / 0 %            | Wiring, 3.3V power, wait a few seconds after boot                                                |
 | Hub TMP36 far off                  | Vs on 3.3V; tune `TMP36_OFFSET_C`; keep sensor away from ESP32 heat                              |
-| Upload fails                       | Hold **BOOT** on some boards during upload; try another USB cable/port                           |
+| Upload fails                       | Hold **BOOT** on some boards during upload; try another USB cable/port; if you see packet/checksum errors, lower `upload_speed` to 460800 in `platformio.ini` |
 | Dashboard “Waiting…”               | Need at least one **indoor** and one **outdoor** node reporting within ~3 minutes                |
 | Garbage on Serial                  | Set baud rate to **115200**                                                                      |
 | RGB colors swapped                 | Swap the R/G/B wires on GPIO 12/13/14                                                            |

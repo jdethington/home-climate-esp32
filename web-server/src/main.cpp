@@ -104,6 +104,15 @@ enum RecState { REC_WAITING, REC_OPEN, REC_CAUTION, REC_MARGINAL, REC_CLOSED };
 RecState computeRecommendation(float iT, float iH, float oT, float oH,
                                int iCnt, int oCnt);
 
+// Dew point (°C) from temperature (°C) and relative humidity (%).
+// Magnus formula; log() here is the natural log, which is what it wants.
+float dewPointC(float tempC, float rhPct) {
+  const float a = 17.271f, b = 237.7f;
+  float gamma = (a * tempC) / (b + tempC) + log(rhPct / 100.0f);
+  return (b * gamma) / (a - gamma);
+}
+
+
 NodeReading* findOrCreate(const char* id) {
   for (int i = 0; i < nodeCount; i++) {
     if (strcmp(nodes[i].id, id) == 0) return &nodes[i];
@@ -205,31 +214,39 @@ void updateStatusLeds() {
 // and the dashboard text go through here so they can never disagree.
 RecState computeRecommendation(float iT, float iH, float oT, float oH,
                                int iCnt, int oCnt) {
-  (void)iH;  // indoor humidity is display-only; the gate is outdoor humidity
+  (void)iH;  // indoor humidity is display-only;
   static bool openLatched = false;
 
   if (iCnt == 0 || oCnt == 0) { openLatched = false; return REC_WAITING; }
 
-  bool humidityOk = (oH <= MAX_OUTDOOR_RH);
+  // Moisture gate, v2: outdoor air must be drier (lower dew point) than
+  // indoor air. Falls back to the old RH cap when indoor humidity is
+  // unknown (TMP36 fallback reports NaN).
+  bool moistureOk;
+  if (isnan(iH)) {
+    moistureOk = (oH <= MAX_OUTDOOR_RH);
+  } else {
+    moistureOk = (dewPointC(oT, oH) <= dewPointC(iT, iH) - DEWPOINT_MARGIN_C);
+  }
   bool coolToOpen = (oT <= iT - TEMP_DELTA_OPEN_C);
   bool coolToHold = (oT <= iT - TEMP_DELTA_CLOSE_C);
 
   if (!openLatched) {
-    if (coolToOpen && humidityOk) openLatched = true;
-  } else if (!coolToHold || !humidityOk) {
+    if (coolToOpen && moistureOk) openLatched = true;
+  } else if (!coolToHold || !moistureOk) {
     openLatched = false;
   }
 
   if (openLatched)                return REC_OPEN;
-  if (coolToOpen && !humidityOk)   return REC_CAUTION;
+  if (coolToOpen && !moistureOk)   return REC_CAUTION;
   if (oT < iT)                    return REC_MARGINAL;
   return REC_CLOSED;
 }
 
 const char* recStateText(RecState s) {
   switch (s) {
-    case REC_OPEN:     return "✅ OPEN windows / doors — outdoor air is cooler and humidity is acceptable";
-    case REC_CAUTION:  return "⚠️ Cooler outside but humidity is high — open only if you accept more moisture";
+    case REC_OPEN:     return "✅ OPEN windows / doors — outdoor air is cooler and drier";
+    case REC_CAUTION:  return "⚠️ Cooler outside but more humid — open only if you accept more moisture";
     case REC_MARGINAL: return "➖ Slightly cooler outside — marginal benefit";
     case REC_CLOSED:   return "❌ Keep closed — outdoor is warmer or not beneficial";
     default:           return "Waiting for indoor & outdoor data…";
@@ -314,6 +331,17 @@ function fmtTemp(c, f) {
   return c.toFixed(1) + ' °C';
 }
 
+function dewPoint(tc, rh) {
+  if (tc == null || rh == null || isNaN(tc) || isNaN(rh)) return null;
+  const a = 171271, b = 237.7;
+  const gamma = (a * tc) / (b + tc) + Math.log(rh / 100);
+  return (b * gamma) / (a - gamma);
+}
+function fmtDew(tc, rh) {
+  const dp = dewPoint(tc, rh);
+  return dp == null ? '—' : fmtTemp(dp, dp * 9 / 5 + 32);
+}
+
 unitSwitch.addEventListener('change', () => {
   useF = unitSwitch.checked;
   localStorage.setItem('climateUnit', useF ? 'F' : 'C');
@@ -341,8 +369,10 @@ async function refresh() {
       ${localRow}
       <div class="row"><span class="label">Indoor Temp${d.indoor.source === 'hub_tmp36' ? ' (hub TMP36)' : ''}</span><span class="val">${fmtTemp(d.indoor.temp_c, d.indoor.temp_f)}</span></div>
       <div class="row"><span class="label">Indoor Humidity</span><span class="val">${d.indoor.humidity == null ? '—' : d.indoor.humidity.toFixed(0) + ' %'}</span></div>
+      <div class="row"><span class="label">Indoor Dew Point</span><span class="val">${fmtDew(d.indoor.temp_c, d.indoor.humidity)}</span></div>
       <div class="row"><span class="label">Outdoor Temp</span><span class="val">${fmtTemp(d.outdoor.temp_c, d.outdoor.temp_f)}</span></div>
       <div class="row"><span class="label">Outdoor Humidity</span><span class="val">${d.outdoor.humidity.toFixed(0)} %</span></div>
+      <div class="row"><span class="label">Outdoor Dew Point</span><span class="val">${fmtDew(d.outdoor.temp_c, d.outdoor.humidity)}</span></div>
       <div class="row"><span class="label">Nodes reporting</span><span class="val">${d.indoor.count} in / ${d.outdoor.count} out</span></div>
     `;
     cards.appendChild(sum);
@@ -356,6 +386,7 @@ async function refresh() {
         <h2>${n.id} <small style="color:#94a3b8">(${n.location})</small></h2>
         <div class="row"><span class="label">Temperature</span><span class="val">${fmtTemp(n.temp_c, n.temp_f)}</span></div>
         <div class="row"><span class="label">Humidity</span><span class="val">${n.humidity.toFixed(0)} %</span></div>
+        <div class="row"><span class="label">Dew Point</span><span class="val">${fmtDew(n.temp_c, n.humidity)}</span></div>
         <div class="row"><span class="label">RSSI</span><span class="val">${n.rssi} dBm</span></div>
         <div class="row"><span class="label">Last seen</span><span class="val">${age}s ago</span></div>
       `;

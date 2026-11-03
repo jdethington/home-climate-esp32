@@ -5,9 +5,8 @@
 // How often sensor nodes read & send (milliseconds)
 #define SENSOR_INTERVAL_MS   30000UL   // 30 seconds
 
-// DHT11 data pin (change if you wire differently)
+// DHT11/DHT22 data pin (change if you wire differently)
 #define DHT_PIN              4
-#define DHT_TYPE             DHT11
 
 // Maximum number of sensor nodes the server tracks
 #define MAX_NODES            8
@@ -18,6 +17,7 @@
 #define TEMP_DELTA_OPEN_C    2.0f      // °C cooler to trigger the OPEN recommendation
 #define TEMP_DELTA_CLOSE_C   1.0f      // °C cooler to keep holding it
 #define MAX_OUTDOOR_RH       65.0f     // don't recommend if outdoor RH above this %
+#define DEWPOINT_MARGIN_C    1.0f      // outdoor dew point must be this far below indoor dew point
 
 // Smoothing: the hub averages each node's last N readings before deciding.
 // N = 10 at the default 30 s interval ≈ 5 minutes of readings.

@@ -1,6 +1,6 @@
 /*
  * Home Climate - Sensor Node
- * Reads DHT11 and POSTs JSON to the central web-server ESP32.
+ * Reads DHT11-DHT22 and POSTs JSON to the central web-server ESP32.
  *
  * Configure:
  *   1. Copy shared/secrets.example.h → src/secrets.h and edit
@@ -27,9 +27,12 @@
 #endif
 // --------------------------------------
 
-DHT dht(DHT_PIN, DHT_TYPE);
+DHT dht22(DHT_PIN, DHT22);   // candidate drivers; detectSensor() picks one
+DHT dht11(DHT_PIN, DHT11);
+DHT* dht = nullptr;          // active driver after auto-detect
 
 unsigned long lastSend = 0;
+unsigned int readFailures = 0;
 
 void connectWiFi() {
   if (WiFi.status() == WL_CONNECTED) return;
@@ -108,14 +111,39 @@ bool sendReading(float tempC, float humidity) {
   return false;
 }
 
+// A DHT11 misread as DHT22 yields impossible values (tenths x256 scale:
+// room temp decodes to 500+ °C), while a DHT22 misread as DHT11 can look
+// plausible (e.g. 1.5 °C). So try DHT22 first: whichever interpretation
+// lands in sane ranges identifies the real sensor.
+bool saneReading(float t, float h) {
+  return !isnan(t) && !isnan(h) && t > -40.0f && t < 80.0f && h >= 0.0f && h <= 100.0f;
+}
+
+void detectSensor() {
+  dht22.begin();
+  delay(2000);                 // both sensors need a moment after power-up
+  if (saneReading(dht22.readTemperature(), dht22.readHumidity())) {
+    dht = &dht22;
+    Serial.println("Sensor auto-detect: DHT22");
+    return;
+  }
+  dht11.begin();
+  delay(2000);
+  if (saneReading(dht11.readTemperature(), dht11.readHumidity())) {
+    dht = &dht11;
+    Serial.println("Sensor auto-detect: DHT11");
+    return;
+  }
+  Serial.println("Sensor auto-detect: no sensor responding (will retry)");
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("\n=== Climate Sensor Node ===");
   Serial.printf("ID: %s  Location: %s\n", NODE_ID, LOCATION);
 
-  dht.begin();
-  delay(2000);                 // DHT11 needs a moment after power-up
+  detectSensor();
   connectWiFi();
 }
 
@@ -127,17 +155,24 @@ void loop() {
   }
   lastSend = now;
 
-  float h = dht.readHumidity();
-  float t = dht.readTemperature();   // Celsius
+  if (!dht) {
+    detectSensor();     // sensor swapped or was unplugged
+    if (!dht) return;   // still no sensor, skip this loop iteration
+  }
+
+  float h = dht->readHumidity();
+  float t = dht->readTemperature();   // Celsius
 
   if (isnan(h) || isnan(t)) {
-    Serial.println("DHT11 read failed – check wiring");
+    Serial.println("Sensor read failed – check wiring");
+    if (++readFailures >= 3) { dht = nullptr; readFailures = 0; }  // re-detect
     return;
   }
+  readFailures = 0;   // reset failure count on successful read
 
   // Skip obviously bad first readings (common right after boot)
   if (t < 1.0 && h < 1.0) {
-    Serial.println("DHT11 still warming up – skipping");
+    Serial.println("Sensor still warming up – skipping");
     return;
   }
 

@@ -8,27 +8,27 @@ Designed for a Phoenix / desert climate home, but the thresholds are fully tunab
 
 ## What it does
 
-- **Sensor nodes** (ESP32 + DHT11) read temperature and humidity and POST JSON to a central hub over your home Wi‑Fi.
-- **Web-server hub** (one ESP32) receives those readings, serves a live dashboard, drives status LEDs, and reads a local TMP36 for a hub reference temperature.
-- The dashboard shows averages, per-node detail, a recommendation banner, and a **°C / °F toggle**.
+- **Sensor nodes** (ESP32 + DHT11/DHT22) read temperature and humidity and POST JSON to a central hub over your home Wi‑Fi.
+- **Web-server hub** (one ESP32) receives those readings, serves a live dashboard, drives status LEDs, and reads its own DHT11/DHT22 — the hub itself is an indoor node.
+- The dashboard shows an averages table (Temp / Humidity / Dew Point × Indoor / Outdoor), per-node detail with a relative "Last seen", a recommendation banner, and a **°C / °F toggle**. Missing data shows "—" instead of a fabricated zero.
 
-You can start with **1 indoor + 1 outdoor + 1 hub** and add more nodes later (up to 8 tracked).
+You can start with the **hub + 1 outdoor node** — the hub counts as an indoor node — and add more nodes later (up to 8 tracked).
 
 ---
 
 ## Hardware
 
-| Role             | Board           | Sensors / extras                                  |
-| ---------------- | --------------- | ------------------------------------------------- |
-| Hub / web server | 1× ESP32 DevKit | TMP36 (Arduino Starter Kit), status LEDs, RGB LED |
-| Indoor nodes     | 1–2× ESP32      | DHT11 each                                        |
-| Outdoor nodes    | 1–2× ESP32      | DHT11 each, weatherproof enclosure                |
+| Role             | Board           | Sensors / extras                                   |
+| ---------------- | --------------- | -------------------------------------------------- |
+| Hub / web server | 1× ESP32 DevKit | DHT11/22 (as an indoor node), status LEDs, RGB LED |
+| Indoor nodes     | 1–2× ESP32      | DHT22 each                                         |
+| Outdoor nodes    | 1–2× ESP32      | DHT11 each, weatherproof enclosure                 |
 
 **Purchased / typical parts**
 
 - ESP32 development boards
 - DHT11 temperature + humidity modules
-- TMP36 analog temperature sensor (on the hub)
+- DHT11/22 temperature + humidity module (on the hub, same wiring as the nodes)
 - Discrete LEDs + 220–330 Ω resistors
 - Common-cathode RGB LED (4 pins)
 - Breadboard / jumpers for prototyping
@@ -49,7 +49,7 @@ You can start with **1 indoor + 1 outdoor + 1 hub** and add more nodes later (up
                 │
          ┌──────▼──────┐
          │  Web Server │  ← http://<hub-ip>/
-         │ ESP32 hub   │  + TMP36 + LEDs + RGB
+         │ ESP32 hub   │  + DHT + LEDs + RGB
          └──────▲──────┘
                 │
        ┌────────┴────────┐
@@ -135,50 +135,56 @@ On any device on the same Wi‑Fi:
 http://<hub-ip>/
 ```
 
-You should see the recommendation, indoor/outdoor averages (plus the hub's own TMP36 reading), and each node. Use the **°C / °F** switch at the top; the choice is remembered in the browser.
+You should see the recommendation, the indoor/outdoor averages table, and a card for each node — including the hub itself as an indoor node. Use the **°C / °F** switch at the top; the choice is remembered in the browser.
 
 ---
 
 ## Wiring
 
-### DHT11 → sensor ESP32
+### DHT11 / DHT22 → sensor ESP32
 
-| DHT11 | ESP32      |
-| ----- | ---------- |
-| VCC   | 3.3V       |
-| GND   | GND        |
-| DATA  | **GPIO 4** |
+| DHT11 / DHT22 | ESP32      |
+| ------------- | ---------- |
+| VCC           | 3.3V       |
+| GND           | GND        |
+| DATA          | **GPIO 4** |
 
 Most modules already have a pull-up. Pin is set in `shared/config.h` as `DHT_PIN`.
+Wiring is identical for both sensor models. The firmware auto-detects which one
+is connected at boot (tries DHT22 first, falls back to DHT11), so any board can
+take either sensor with no code or build changes — just flash the right
+`indoor`/`outdoor` environment for its location.
 
-### TMP36 → hub ESP32
+### DHT11 / DHT22 → hub ESP32
 
-| TMP36 (flat face toward you) | ESP32             |
-| ---------------------------- | ----------------- |
-| Left (Vs)                    | **3.3V** (not 5V) |
-| Middle (Vout)                | **GPIO 34**       |
-| Right (GND)                  | GND               |
+Same wiring as a sensor node — the hub's own sensor is on **GPIO 4**, and the firmware auto-detects DHT11 vs DHT22 at boot:
 
-If the hub temperature is consistently high/low vs a known thermometer, tune in `web-server/src/main.cpp`:
+| DHT11 / DHT22 | ESP32      |
+| ------------- | ---------- |
+| VCC           | 3.3V       |
+| GND           | GND        |
+| DATA          | **GPIO 4** |
 
-```cpp
-#define TMP36_OFFSET_C  -4.0f   // adjust as needed
-```
+The hub reads its sensor every 30 seconds and appears on the dashboard as the `hub` indoor node, with its own rolling average like any other node. If its sensor fails, the hub card goes stale after ~3 minutes like any dead node — there is no temperature-only fallback anymore.
 
 ### Hub status LEDs (as used in current firmware)
 
-| Function                                            | GPIO   | Notes                       |
-| --------------------------------------------------- | ------ | --------------------------- |
-| Sensor POST received (blink)                        | **2**  | Onboard LED |
-| Wi‑Fi connected (+ brief blink on browser activity) | **16**  | Solid when joined to router |
-| RGB Red                                             | **13** | PWM                         |
-| RGB Green                                           | **14** | PWM                         |
-| RGB Blue                                            | **18** | PWM                         |
-| Indoor data fresh (&lt; 3 min)                      | **19** |                             |
-| Outdoor data fresh (&lt; 3 min)                     | **21** |                             |
+| Function                                            | GPIO   | Notes                                                             |
+| --------------------------------------------------- | ------ | ----------------------------------------------------------------- |
+| Sensor POST received (blink)                        | **2**  | Onboard LED                                                       |
+| Wi‑Fi connected (+ brief blink on browser activity) | **16** | Half-bright (PWM 64) when joined; full bright on browser activity |
+| RGB Red                                             | **13** | PWM                                                               |
+| RGB Green                                           | **14** | PWM                                                               |
+| RGB Blue                                            | **18** | PWM                                                               |
+| Indoor data fresh (&lt; 3 min)                      | **19** |                                                                   |
+| Outdoor data fresh (&lt; 3 min)                     | **21** |                                                                   |
 
 Pin choices avoid the ESP32 boot strapping pins (0, 5, 12, 15). GPIO 2 is kept
-because it drives the onboard LED.
+because it drives the onboard LED (active-HIGH on this board — verified: the
+LED lights when GPIO 2 is HIGH). Note the outdoor LED currently uses GPIO 21,
+which is the board's default I2C SDA pin — it will need to move (GPIO 25 was
+used before) before adding an I2C sensor. The DHT data pin (GPIO 4) is
+digital-only use, so its ADC2 membership doesn't matter.
 
 **RGB (common-cathode, 4 wires)**
 
@@ -209,7 +215,7 @@ Configured in `shared/config.h`:
 ```cpp
 #define TEMP_DELTA_OPEN_C   2.0f   // latch OPEN when outdoor is this many °C cooler
 #define TEMP_DELTA_CLOSE_C  1.0f   // drop OPEN when the margin shrinks below this
-#define MAX_OUTDOOR_RH      65.0f  // max outdoor RH (%) to fully recommend opening
+#define DEWPOINT_MARGIN_C   1.0f   // outdoor dew point must be this many °C below indoor
 #define READING_HISTORY_N   10     // per-node readings averaged (≈5 min at 30 s)
 ```
 
@@ -217,14 +223,18 @@ Configured in `shared/config.h`:
   decides on the rolling average, so one noisy DHT11 read can't flip the
   recommendation. Node cards on the dashboard show these smoothed values.
 - **Hysteresis** — the OPEN recommendation latches on once outdoor is ≥ 2 °C
-  cooler (and humidity is OK) and stays on until the margin shrinks below 1 °C
-  or outdoor humidity goes bad. No flapping on borderline evenings.
-- **OPEN** — outdoor cooler by ≥ `TEMP_DELTA_OPEN_C` and RH ≤ `MAX_OUTDOOR_RH`
-- **Caution** — cooler outside but humidity high
+  cooler (and the dew-point gate passes) and stays on until the margin shrinks
+  below 1 °C or the dew-point gate fails. No flapping on borderline evenings.
+- **Moisture gate** — outdoor air must be drier than indoor air: outdoor dew
+  point ≤ indoor dew point − `DEWPOINT_MARGIN_C`. (The old outdoor-RH cap is
+  gone; `MAX_OUTDOOR_RH` is no longer used.)
+- **OPEN** — outdoor cooler by ≥ `TEMP_DELTA_OPEN_C` and the dew-point gate passes
+- **Caution** — cooler outside but more humid (higher dew point)
 - **Marginal** — slightly cooler, small benefit
 - **Keep closed** — outdoor warmer or not beneficial
-- **Indoor fallback** — if no indoor node is reporting, the hub's TMP36 stands in
-  as the indoor temperature (the dashboard labels it and shows "—" for humidity).
+- **Hub as indoor node** — the hub's own DHT counts as an indoor node, so the
+  recommendation works with zero remote indoor nodes. If the hub sensor fails,
+  its card goes stale like any dead node.
 
 The RGB LED and the dashboard banner share one decision function, so they can
 never disagree. Rebuild and re-upload the **web-server** after changing thresholds.
@@ -238,7 +248,7 @@ home-climate-esp32/
 ├── sensor-node/           # PlatformIO: DHT11 nodes (multi-env)
 │   ├── platformio.ini     # indoor1/2, outdoor1/2
 │   └── src/main.cpp
-├── web-server/            # PlatformIO: hub + dashboard + LEDs + TMP36
+├── web-server/            # PlatformIO: hub + dashboard + LEDs + DHT
 │   ├── platformio.ini
 │   └── src/main.cpp
 ├── shared/
@@ -262,7 +272,8 @@ Useful hub lines:
 ```
 WiFi OK  IP: 192.168.0.x
 HTTP server started
-TMP36: 25.1 °C / 77.2 °F
+Sensor auto-detect: DHT22
+Hub DHT: 25.1 °C / 32.0 %
 RX in1 (indoor): 25.5°C  32%
 ```
 
@@ -278,16 +289,16 @@ POST http://192.168.0.x:80/api/reading → HTTP 200  (OK)
 
 ## Troubleshooting
 
-| Symptom                            | What to try                                                                                      |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------ |
-| Hub starts soft AP (`192.168.4.1`) | Wrong SSID/password in **web-server** `secrets.h`; re-upload                                     |
-| Sensor `HTTP -1` / `-11`           | Confirm hub IP in sensor `secrets.h`, re-upload sensor; same 2.4 GHz Wi‑Fi; retries are built in |
-| DHT11 NaN or 0 °C / 0 %            | Wiring, 3.3V power, wait a few seconds after boot                                                |
-| Hub TMP36 far off                  | Vs on 3.3V; tune `TMP36_OFFSET_C`; keep sensor away from ESP32 heat                              |
+| Symptom                            | What to try                                                                                                                                                   |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Hub starts soft AP (`192.168.4.1`) | Wrong SSID/password in **web-server** `secrets.h`; re-upload                                                                                                  |
+| Sensor `HTTP -1` / `-11`           | Confirm hub IP in sensor `secrets.h`, re-upload sensor; same 2.4 GHz Wi‑Fi; retries are built in                                                              |
+| DHT11/DHT22 NaN or 0 °C / 0 %      | Wiring, 3.3V power, wait a few seconds after boot                                                                                                             |
+| Hub DHT NaN / hub card stale       | Check DHT wiring on GPIO 4 and 3.3V power; the hub re-detects the sensor after 3 failed reads                                                                 |
 | Upload fails                       | Hold **BOOT** on some boards during upload; try another USB cable/port; if you see packet/checksum errors, lower `upload_speed` to 460800 in `platformio.ini` |
-| Dashboard “Waiting…”               | Need at least one **indoor** and one **outdoor** node reporting within ~3 minutes                |
-| Garbage on Serial                  | Set baud rate to **115200**                                                                      |
-| RGB colors swapped                 | Swap the R/G/B wires on GPIO 12/13/14                                                            |
+| Dashboard “Waiting…”               | Need at least one **indoor** (the hub itself counts) and one **outdoor** node reporting within ~3 minutes                                                     |
+| Garbage on Serial                  | Set baud rate to **115200**                                                                                                                                   |
+| RGB colors swapped                 | Swap the R/G/B wires on GPIO 13/14/18                                                                                                                         |
 
 ---
 
